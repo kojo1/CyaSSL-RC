@@ -86,6 +86,12 @@
     #endif
 #endif
 
+#if defined(CYASSL_MDK_ARM)
+        #include <stdio.h>
+        #include <stdlib.h>
+    extern FILE * CyaSSL_fopen(const char *fname, const char *mode) ;
+    #define fopen CyaSSL_fopen
+#endif
 
 #ifdef HAVE_NTRU
     #include "crypto_ntru.h"
@@ -134,6 +140,8 @@ int  hmac_sha_test(void);
 int  hmac_sha256_test(void);
 int  hmac_sha384_test(void);
 int  hmac_sha512_test(void);
+int  hmac_blake2b_test(void);
+int  hkdf_test(void);
 int  arc4_test(void);
 int  hc128_test(void);
 int  rabbit_test(void);
@@ -299,6 +307,20 @@ void ctaocrypt_test(void* args)
             err_sys("HMAC-SHA512 test failed!\n", ret);
         else
             printf( "HMAC-SHA512 test passed!\n");
+    #endif
+
+    #ifdef HAVE_BLAKE2 
+        if ( (ret = hmac_blake2b_test()) != 0) 
+            err_sys("HMAC-BLAKE2 test failed!\n", ret);
+        else
+            printf( "HMAC-BLAKE2 test passed!\n");
+    #endif
+
+    #ifdef HAVE_HKDF
+        if ( (ret = hkdf_test()) != 0) 
+            err_sys("HMAC-KDF    test failed!\n", ret);
+        else
+            printf( "HMAC-KDF    test passed!\n");
     #endif
 
 #endif
@@ -1212,6 +1234,78 @@ int hmac_sha256_test(void)
         HmacFinal(&hmac, hash);
 
         if (memcmp(hash, test_hmac[i].output, SHA256_DIGEST_SIZE) != 0)
+            return -20 - i;
+#ifdef HAVE_CAVIUM
+        HmacFreeCavium(&hmac);
+#endif
+    }
+
+    return 0;
+}
+#endif
+
+
+#if !defined(NO_HMAC) && defined(HAVE_BLAKE2)
+int hmac_blake2b_test(void)
+{
+    Hmac hmac;
+    byte hash[BLAKE2B_256];
+
+    const char* keys[]=
+    {
+        "\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b\x0b"
+                                                                "\x0b\x0b\x0b",
+        "Jefe",
+        "\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA\xAA"
+                                                                "\xAA\xAA\xAA"
+    };
+
+    testVector a, b, c;
+    testVector test_hmac[3];
+
+    int times = sizeof(test_hmac) / sizeof(testVector), i;
+
+    a.input  = "Hi There";
+    a.output = "\x72\x93\x0d\xdd\xf5\xf7\xe1\x78\x38\x07\x44\x18\x0b\x3f\x51"
+               "\x37\x25\xb5\x82\xc2\x08\x83\x2f\x1c\x99\xfd\x03\xa0\x16\x75"
+               "\xac\xfd";
+    a.inLen  = strlen(a.input);
+    a.outLen = BLAKE2B_256;
+
+    b.input  = "what do ya want for nothing?";
+    b.output = "\x3d\x20\x50\x71\x05\xc0\x8c\x0c\x38\x44\x1e\xf7\xf9\xd1\x67"
+               "\x21\xff\x64\xf5\x94\x00\xcf\xf9\x75\x41\xda\x88\x61\x9d\x7c"
+               "\xda\x2b";
+    b.inLen  = strlen(b.input);
+    b.outLen = BLAKE2B_256;
+
+    c.input  = "\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD"
+               "\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD"
+               "\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD\xDD"
+               "\xDD\xDD\xDD\xDD\xDD\xDD";
+    c.output = "\xda\xfe\x2a\x24\xfc\xe7\xea\x36\x34\xbe\x41\x92\xc7\x11\xa7"
+               "\x00\xae\x53\x9c\x11\x9c\x80\x74\x55\x22\x25\x4a\xb9\x55\xd3"
+               "\x0f\x87";
+    c.inLen  = strlen(c.input);
+    c.outLen = BLAKE2B_256;
+
+    test_hmac[0] = a;
+    test_hmac[1] = b;
+    test_hmac[2] = c;
+
+    for (i = 0; i < times; ++i) {
+#ifdef HAVE_CAVIUM
+        if (i == 1)
+            continue; /* driver can't handle keys <= bytes */
+        if (HmacInitCavium(&hmac, CAVIUM_DEV_ID) != 0)
+            return -20011; 
+#endif
+        HmacSetKey(&hmac, BLAKE2B_ID, (byte*)keys[i], (word32)strlen(keys[i]));
+        HmacUpdate(&hmac, (byte*)test_hmac[i].input,
+                   (word32)test_hmac[i].inLen);
+        HmacFinal(&hmac, hash);
+
+        if (memcmp(hash, test_hmac[i].output, BLAKE2B_256) != 0)
             return -20 - i;
 #ifdef HAVE_CAVIUM
         HmacFreeCavium(&hmac);
@@ -3323,6 +3417,87 @@ int pwdbased_test(void)
 
 #endif /* NO_PWDBASED */
 
+#if defined(HAVE_HKDF) && (!defined(NO_SHA) || !defined(NO_SHA256))
+
+int hkdf_test(void)
+{
+    int ret;
+    int L = 42;
+    byte okm1[42];
+    byte ikm1[22] = { 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+                      0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+                      0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b };
+    byte salt1[13] ={ 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                      0x08, 0x09, 0x0a, 0x0b, 0x0c };
+    byte info1[10] ={ 0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7,
+                      0xf8, 0xf9 };
+    byte res1[42] = { 0x0a, 0xc1, 0xaf, 0x70, 0x02, 0xb3, 0xd7, 0x61,
+                      0xd1, 0xe5, 0x52, 0x98, 0xda, 0x9d, 0x05, 0x06,
+                      0xb9, 0xae, 0x52, 0x05, 0x72, 0x20, 0xa3, 0x06,
+                      0xe0, 0x7b, 0x6b, 0x87, 0xe8, 0xdf, 0x21, 0xd0,
+                      0xea, 0x00, 0x03, 0x3d, 0xe0, 0x39, 0x84, 0xd3,
+                      0x49, 0x18 };
+    byte res2[42] = { 0x08, 0x5a, 0x01, 0xea, 0x1b, 0x10, 0xf3, 0x69,
+                      0x33, 0x06, 0x8b, 0x56, 0xef, 0xa5, 0xad, 0x81,
+                      0xa4, 0xf1, 0x4b, 0x82, 0x2f, 0x5b, 0x09, 0x15,
+                      0x68, 0xa9, 0xcd, 0xd4, 0xf1, 0x55, 0xfd, 0xa2,
+                      0xc2, 0x2e, 0x42, 0x24, 0x78, 0xd3, 0x05, 0xf3,
+                      0xf8, 0x96 };
+    byte res3[42] = { 0x8d, 0xa4, 0xe7, 0x75, 0xa5, 0x63, 0xc1, 0x8f,
+                      0x71, 0x5f, 0x80, 0x2a, 0x06, 0x3c, 0x5a, 0x31,
+                      0xb8, 0xa1, 0x1f, 0x5c, 0x5e, 0xe1, 0x87, 0x9e,
+                      0xc3, 0x45, 0x4e, 0x5f, 0x3c, 0x73, 0x8d, 0x2d,
+                      0x9d, 0x20, 0x13, 0x95, 0xfa, 0xa4, 0xb6, 0x1a,
+                      0x96, 0xc8 };
+    byte res4[42] = { 0x3c, 0xb2, 0x5f, 0x25, 0xfa, 0xac, 0xd5, 0x7a,
+                      0x90, 0x43, 0x4f, 0x64, 0xd0, 0x36, 0x2f, 0x2a,
+                      0x2d, 0x2d, 0x0a, 0x90, 0xcf, 0x1a, 0x5a, 0x4c,
+                      0x5d, 0xb0, 0x2d, 0x56, 0xec, 0xc4, 0xc5, 0xbf,
+                      0x34, 0x00, 0x72, 0x08, 0xd5, 0xb8, 0x87, 0x18,
+                      0x58, 0x65 };
+
+    (void)res1;
+    (void)res2;
+    (void)res3;
+    (void)res4;
+
+#ifndef NO_SHA
+    ret = HKDF(SHA, ikm1, 22, NULL, 0, NULL, 0, okm1, L);
+    if (ret != 0)
+        return -2001;
+
+    if (memcmp(okm1, res1, L) != 0)
+        return -2002;
+   
+    ret = HKDF(SHA, ikm1, 11, salt1, 13, info1, 10, okm1, L);
+    if (ret != 0)
+        return -2003;
+
+    if (memcmp(okm1, res2, L) != 0)
+        return -2004;
+#endif /* NO_SHA */
+
+#ifndef NO_SHA256
+    ret = HKDF(SHA256, ikm1, 22, NULL, 0, NULL, 0, okm1, L);
+    if (ret != 0)
+        return -2005;
+
+    if (memcmp(okm1, res3, L) != 0)
+        return -2006;
+
+    ret = HKDF(SHA256, ikm1, 22, salt1, 13, info1, 10, okm1, L);
+    if (ret != 0)
+        return -2007;
+
+    if (memcmp(okm1, res4, L) != 0)
+        return -2007;
+#endif /* NO_SHA256 */
+
+    return 0;
+}
+
+#endif /* HAVE_HKDF */
+
 
 #ifdef HAVE_ECC
 
@@ -3401,6 +3576,11 @@ int ecc_test(void)
 
     if (verify != 1)
         return -1012;
+
+    x = sizeof(exportBuf);
+    ret = ecc_export_private_only(&userA, exportBuf, &x);
+    if (ret != 0)
+        return -1013;
 
     ecc_free(&pubKey);
     ecc_free(&userB);

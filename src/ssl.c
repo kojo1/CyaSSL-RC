@@ -89,12 +89,12 @@
 #endif /* min */
 
 #ifndef max
-
+#ifdef CYASSL_DTLS
     static INLINE word32 max(word32 a, word32 b)
     {
         return a > b ? a : b;
     }
-
+#endif
 #endif /* min */
 
 
@@ -2095,7 +2095,12 @@ int CyaSSL_CertManagerVerifyBuffer(CYASSL_CERT_MANAGER* cm, const byte* buff,
 #else
     /* stdio, default case */
     #define XFILE      FILE*
-    #define XFOPEN     fopen 
+    #if defined(CYASSL_MDK_ARM)
+        extern FILE * CyaSSL_fopen(const char *name, const char *mode) ;
+        #define XFOPEN     CyaSSL_fopen
+    #else
+        #define XFOPEN     fopen
+    #endif
     #define XFSEEK     fseek
     #define XFTELL     ftell
     #define XREWIND    rewind
@@ -5613,7 +5618,8 @@ int CyaSSL_set_compression(CYASSL* ssl)
 
     int CyaSSL_X509_STORE_CTX_get_error(CYASSL_X509_STORE_CTX* ctx)
     {
-        (void)ctx; 
+        if (ctx != NULL)
+            return ctx->error;
         return 0;
     }
 
@@ -5756,6 +5762,7 @@ int CyaSSL_set_compression(CYASSL* ssl)
     #define CloseSocket(s) closesocket(s)
 #elif defined(CYASSL_MDK_ARM)
     #define CloseSocket(s) closesocket(s)
+    extern int closesocket(int) ;
 #else
     #define CloseSocket(s) close(s)
 #endif
@@ -7066,6 +7073,76 @@ int CyaSSL_set_compression(CYASSL* ssl)
     }
 
 
+    int CyaSSL_X509_NAME_entry_count(CYASSL_X509_NAME* name)
+    {
+        int count = 0;
+
+        CYASSL_ENTER("CyaSSL_X509_NAME_entry_count");
+
+        if (name != NULL)
+            count = name->fullName.entryCount;
+
+        CYASSL_LEAVE("CyaSSL_X509_NAME_entry_count", count);
+        return count;
+    }
+
+
+    int CyaSSL_X509_NAME_get_text_by_NID(CYASSL_X509_NAME* name,
+                                                    int nid, char* buf, int len)
+    {
+        char *text = NULL;
+        int textSz = 0;
+
+        CYASSL_ENTER("CyaSSL_X509_NAME_get_text_by_NID");
+
+        switch (nid) {
+            case ASN_COMMON_NAME:
+                text = name->fullName.fullName + name->fullName.cnIdx;
+                textSz = name->fullName.cnLen;
+                break;
+            case ASN_SUR_NAME:
+                text = name->fullName.fullName + name->fullName.snIdx;
+                textSz = name->fullName.snLen;
+                break;
+            case ASN_SERIAL_NUMBER:
+                text = name->fullName.fullName + name->fullName.serialIdx;
+                textSz = name->fullName.serialLen;
+                break;
+            case ASN_COUNTRY_NAME:
+                text = name->fullName.fullName + name->fullName.cIdx;
+                textSz = name->fullName.cLen;
+                break;
+            case ASN_LOCALITY_NAME:
+                text = name->fullName.fullName + name->fullName.lIdx;
+                textSz = name->fullName.lLen;
+                break;
+            case ASN_STATE_NAME:
+                text = name->fullName.fullName + name->fullName.stIdx;
+                textSz = name->fullName.stLen;
+                break;
+            case ASN_ORG_NAME:
+                text = name->fullName.fullName + name->fullName.oIdx;
+                textSz = name->fullName.oLen;
+                break;
+            case ASN_ORGUNIT_NAME:
+                text = name->fullName.fullName + name->fullName.ouIdx;
+                textSz = name->fullName.ouLen;
+                break;
+            default:
+                break;
+        }
+
+        if (buf != NULL) {
+            textSz = min(textSz, len);
+            XMEMCPY(buf, text, textSz);
+            buf[textSz] = '\0';
+        }
+
+        CYASSL_LEAVE("CyaSSL_X509_NAME_get_text_by_NID", textSz);
+        return textSz;
+    }
+
+
     /* write X509 serial number in unsigned binary to buffer 
        buffer needs to be at least EXTERNAL_SERIAL_SIZE (32) for all cases
        return SSL_SUCCESS on success */
@@ -7092,6 +7169,40 @@ int CyaSSL_set_compression(CYASSL* ssl)
         *outSz = (int)x509->derCert.length;
         return x509->derCert.buffer;
     }
+
+
+    int CyaSSL_X509_version(CYASSL_X509* x509)
+    {
+        CYASSL_ENTER("CyaSSL_X509_version");
+
+        if (x509 == NULL)
+            return 0;
+
+        return x509->version;
+    }
+
+
+    const byte* CyaSSL_X509_notBefore(CYASSL_X509* x509)
+    {
+        CYASSL_ENTER("CyaSSL_X509_notBefore");
+
+        if (x509 == NULL)
+            return NULL;
+
+        return x509->notBefore;
+    }
+
+
+    const byte* CyaSSL_X509_notAfter(CYASSL_X509* x509)
+    {
+        CYASSL_ENTER("CyaSSL_X509_notAfter");
+
+        if (x509 == NULL)
+            return NULL;
+
+        return x509->notAfter;
+    }
+
 
 #ifdef CYASSL_SEP
 
@@ -7168,6 +7279,66 @@ byte* CyaSSL_X509_get_hw_serial_number(CYASSL_X509* x509,byte* in,int* inOutSz)
 
 #endif /* CYASSL_SEP */
 
+
+CYASSL_X509* CyaSSL_X509_d2i(CYASSL_X509** x509, const byte* in, int len)
+{
+    CYASSL_X509 *newX509 = NULL;
+
+    CYASSL_ENTER("CyaSSL_X509_d2i");
+
+    if (in != NULL && len != 0) {
+        DecodedCert cert;
+
+        InitDecodedCert(&cert, (byte*)in, len, NULL);
+        if (ParseCertRelative(&cert, CERT_TYPE, 0, NULL) == 0) {
+            newX509 = (CYASSL_X509*)XMALLOC(sizeof(CYASSL_X509),
+                                                       NULL, DYNAMIC_TYPE_X509);
+            if (newX509 != NULL) {
+                InitX509(newX509, 1);
+                if (CopyDecodedToX509(newX509, &cert) != 0) {
+                    XFREE(newX509, NULL, DYNAMIC_TYPE_X509);
+                    newX509 = NULL;
+                }
+            }
+        }
+        FreeDecodedCert(&cert);
+    }
+
+    if (x509 != NULL)
+        *x509 = newX509;
+
+    return newX509;
+}
+
+
+CYASSL_X509* CyaSSL_X509_d2i_fp(CYASSL_X509** x509, XFILE file)
+{
+    CYASSL_X509* newX509 = NULL;
+
+    CYASSL_ENTER("CyaSSL_X509_d2i_fp");
+
+    if (file != XBADFILE) {
+        byte* fileBuffer = NULL;
+        long sz = 0;
+
+        XFSEEK(file, 0, XSEEK_END);
+        sz = XFTELL(file);
+        XREWIND(file);
+
+        fileBuffer = (byte*)XMALLOC(sz, NULL, DYNAMIC_TYPE_FILE);
+        if (fileBuffer != NULL) {
+            if ((int)XFREAD(fileBuffer, sz, 1, file) > 0) {
+                newX509 = CyaSSL_X509_d2i(NULL, fileBuffer, (int)sz);
+            }
+            XFREE(fileBuffer, NULL, DYNAMIC_TYPE_FILE);
+        }
+    }
+
+    if (x509 != NULL)
+        *x509 = newX509;
+
+    return newX509;
+}
 
 CYASSL_X509* CyaSSL_X509_load_certificate_file(const char* fname, int format)
 {
@@ -7530,6 +7701,12 @@ CYASSL_X509* CyaSSL_X509_load_certificate_file(const char* fname, int format)
                     return "TLS_RSA_WITH_AES_128_CBC_SHA256";
                 case TLS_RSA_WITH_AES_256_CBC_SHA256 :
                     return "TLS_RSA_WITH_AES_256_CBC_SHA256";
+        #ifdef HAVE_BLAKE2 
+                case TLS_RSA_WITH_AES_128_CBC_B2B256:
+                    return "TLS_RSA_WITH_AES_128_CBC_B2B256";
+                case TLS_RSA_WITH_AES_256_CBC_B2B256:
+                    return "TLS_RSA_WITH_AES_256_CBC_B2B256";
+        #endif
     #ifndef NO_SHA
                 case TLS_RSA_WITH_NULL_SHA :
                     return "TLS_RSA_WITH_NULL_SHA";
@@ -7574,18 +7751,22 @@ CYASSL_X509* CyaSSL_X509_load_certificate_file(const char* fname, int format)
     #endif
     #ifndef NO_HC128
         #ifndef NO_MD5
-                case TLS_RSA_WITH_HC_128_CBC_MD5 :
-                    return "TLS_RSA_WITH_HC_128_CBC_MD5";
+                case TLS_RSA_WITH_HC_128_MD5 :
+                    return "TLS_RSA_WITH_HC_128_MD5";
         #endif
         #ifndef NO_SHA
-                case TLS_RSA_WITH_HC_128_CBC_SHA :
-                    return "TLS_RSA_WITH_HC_128_CBC_SHA";
+                case TLS_RSA_WITH_HC_128_SHA :
+                    return "TLS_RSA_WITH_HC_128_SHA";
+        #endif
+        #ifdef HAVE_BLAKE2 
+                case TLS_RSA_WITH_HC_128_B2B256:
+                    return "TLS_RSA_WITH_HC_128_B2B256";
         #endif
     #endif /* NO_HC128 */
     #ifndef NO_SHA
         #ifndef NO_RABBIT
-                case TLS_RSA_WITH_RABBIT_CBC_SHA :
-                    return "TLS_RSA_WITH_RABBIT_CBC_SHA";
+                case TLS_RSA_WITH_RABBIT_SHA :
+                    return "TLS_RSA_WITH_RABBIT_SHA";
         #endif
         #ifdef HAVE_NTRU
             #ifndef NO_RC4
@@ -7955,9 +8136,61 @@ CYASSL_X509* CyaSSL_X509_load_certificate_file(const char* fname, int format)
     }
 
 
+    int CyaSSL_X509_STORE_add_cert(CYASSL_X509_STORE* store, CYASSL_X509* x509)
+    {
+        int result = SSL_FATAL_ERROR;
+
+        CYASSL_ENTER("CyaSSL_X509_STORE_add_cert");
+        if (store != NULL && store->cm != NULL && x509 != NULL) {
+            buffer derCert;
+            derCert.buffer = (byte*)XMALLOC(x509->derCert.length,
+                                                       NULL, DYNAMIC_TYPE_CERT);
+            if (derCert.buffer != NULL) {
+                derCert.length = x509->derCert.length;
+                    // AddCA() frees the buffer.
+                XMEMCPY(derCert.buffer,
+                                    x509->derCert.buffer, x509->derCert.length);
+                result = AddCA(store->cm, derCert, CYASSL_USER_CA, 1);
+                if (result != SSL_SUCCESS) result = SSL_FATAL_ERROR;
+            }
+        }
+
+        CYASSL_LEAVE("CyaSSL_X509_STORE_add_cert", result);
+        return result;
+    }
+
+
     CYASSL_X509_STORE* CyaSSL_X509_STORE_new(void)
     {
-        return 0;
+        CYASSL_X509_STORE* store = NULL;
+
+        store = (CYASSL_X509_STORE*)XMALLOC(sizeof(CYASSL_X509_STORE), NULL, 0);
+        if (store != NULL) {
+            store->cm = CyaSSL_CertManagerNew();
+            if (store->cm == NULL) {
+                XFREE(store, NULL, 0);
+                store = NULL;
+            }
+        }
+
+        return store;
+    }
+
+
+    void CyaSSL_X509_STORE_free(CYASSL_X509_STORE* store)
+    {
+        if (store != NULL) {
+            if (store->cm != NULL)
+            CyaSSL_CertManagerFree(store->cm);
+            XFREE(store, NULL, 0);
+        }
+    }
+
+
+    int CyaSSL_X509_STORE_set_default_paths(CYASSL_X509_STORE* store)
+    {
+        (void)store;
+        return SSL_SUCCESS;
     }
 
 
@@ -7972,14 +8205,46 @@ CYASSL_X509* CyaSSL_X509_load_certificate_file(const char* fname, int format)
     }
 
 
+    CYASSL_X509_STORE_CTX* CyaSSL_X509_STORE_CTX_new(void)
+    {
+        CYASSL_X509_STORE_CTX* ctx = (CYASSL_X509_STORE_CTX*)XMALLOC(
+                                        sizeof(CYASSL_X509_STORE_CTX), NULL, 0);
+
+        if (ctx != NULL)
+            CyaSSL_X509_STORE_CTX_init(ctx, NULL, NULL, NULL);
+        
+        return ctx;
+    }
+
+
     int CyaSSL_X509_STORE_CTX_init(CYASSL_X509_STORE_CTX* ctx,
          CYASSL_X509_STORE* store, CYASSL_X509* x509, STACK_OF(CYASSL_X509)* sk)
     {
-        (void)ctx;
-        (void)store;
-        (void)x509;
         (void)sk;
-        return 0;
+        if (ctx != NULL) {
+            ctx->store = store;
+            ctx->current_cert = x509;
+            ctx->domain = NULL;
+            ctx->ex_data = NULL;
+            ctx->userCtx = NULL;
+            ctx->error = 0;
+            ctx->error_depth = 0;
+            ctx->discardSessionCerts = 0;
+            return SSL_SUCCESS;
+        }
+        return SSL_FATAL_ERROR;
+    }
+
+
+    void CyaSSL_X509_STORE_CTX_free(CYASSL_X509_STORE_CTX* ctx)
+    {
+        if (ctx != NULL) {
+            if (ctx->store != NULL)
+                CyaSSL_X509_STORE_free(ctx->store);
+            if (ctx->current_cert != NULL)
+                CyaSSL_FreeX509(ctx->current_cert);
+            XFREE(ctx, NULL, 0);
+        }
     }
 
 
@@ -7988,6 +8253,18 @@ CYASSL_X509* CyaSSL_X509_load_certificate_file(const char* fname, int format)
         (void)ctx;
     }
 
+
+    int CyaSSL_X509_verify_cert(CYASSL_X509_STORE_CTX* ctx)
+    {
+        if (ctx != NULL && ctx->store != NULL && ctx->store->cm != NULL
+                                                 && ctx->current_cert != NULL) {
+            return CyaSSL_CertManagerVerifyBuffer(ctx->store->cm, 
+                        ctx->current_cert->derCert.buffer,
+                        ctx->current_cert->derCert.length,
+                        SSL_FILETYPE_ASN1);
+        }
+        return SSL_FATAL_ERROR;
+    }
 
 
     CYASSL_ASN1_TIME* CyaSSL_X509_CRL_get_lastUpdate(CYASSL_X509_CRL* crl)
@@ -8007,8 +8284,25 @@ CYASSL_X509* CyaSSL_X509_load_certificate_file(const char* fname, int format)
 
     CYASSL_EVP_PKEY* CyaSSL_X509_get_pubkey(CYASSL_X509* x509)
     {
-        (void)x509;
-        return 0;
+        CYASSL_EVP_PKEY* key = NULL;
+        if (x509 != NULL) {
+            key = (CYASSL_EVP_PKEY*)XMALLOC(
+                        sizeof(CYASSL_EVP_PKEY), NULL, DYNAMIC_TYPE_PUBLIC_KEY);
+            if (key != NULL) {
+                key->type = 0;
+                key->save_type = 0;
+                key->pkey.ptr = (char*)XMALLOC(
+                            x509->pubKey.length, NULL, DYNAMIC_TYPE_PUBLIC_KEY);
+                if (key->pkey.ptr == NULL) {
+                    XFREE(key, NULL, DYNAMIC_TYPE_PUBLIC_KEY);
+                    return NULL;
+                }
+                XMEMCPY(key->pkey.ptr,
+                                      x509->pubKey.buffer, x509->pubKey.length);
+                key->pkey_sz = x509->pubKey.length;
+            }
+        }
+        return key;
     }
 
 
@@ -8035,7 +8329,11 @@ CYASSL_X509* CyaSSL_X509_load_certificate_file(const char* fname, int format)
 
     void CyaSSL_EVP_PKEY_free(CYASSL_EVP_PKEY* key)
     {
-        (void)key;
+        if (key != NULL) {
+            if (key->pkey.ptr != NULL)
+                XFREE(key->pkey.ptr, NULL, 0);
+            XFREE(key, NULL, 0);
+        }
     }
 
 
@@ -9885,7 +10183,6 @@ static int initGlobalRNG = 0;
                 case ARC4_TYPE:
                     CYASSL_MSG("returning arc4 state");
                     return (void*)&ctx->cipher.arc4.x;
-                    break;
 
                 default:
                     CYASSL_MSG("bad x state type");
@@ -9906,7 +10203,6 @@ static int initGlobalRNG = 0;
                 case ARC4_TYPE:
                     CYASSL_MSG("returning arc4 state size");
                     return sizeof(Arc4);
-                    break;
 
                 default:
                     CYASSL_MSG("bad x state type");
@@ -10009,7 +10305,6 @@ static int initGlobalRNG = 0;
             case AES_256_CBC_TYPE :
                 CYASSL_MSG("AES CBC");
                 return AES_BLOCK_SIZE;
-                break;
 
 #ifdef CYASSL_AES_COUNTER
             case AES_128_CTR_TYPE :
@@ -10017,28 +10312,23 @@ static int initGlobalRNG = 0;
             case AES_256_CTR_TYPE :
                 CYASSL_MSG("AES CTR");
                 return AES_BLOCK_SIZE;
-                break;
 #endif
 
             case DES_CBC_TYPE :
                 CYASSL_MSG("DES CBC");
                 return DES_BLOCK_SIZE;
-                break;
                 
             case DES_EDE3_CBC_TYPE :
                 CYASSL_MSG("DES EDE3 CBC");
                 return DES_BLOCK_SIZE;
-                break;
 
             case ARC4_TYPE :
                 CYASSL_MSG("ARC4");
                 return 0;
-                break;
 
             case NULL_CIPHER_TYPE :
                 CYASSL_MSG("NULL");
                 return 0;
-                break;
 
             default: {
                 CYASSL_MSG("bad type");
